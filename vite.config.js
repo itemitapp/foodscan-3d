@@ -1,9 +1,7 @@
 import { defineConfig } from 'vite';
 
-import { cloudflare } from "@cloudflare/vite-plugin";
-
 export default defineConfig({
-  plugins: [cloudflare()],
+  plugins: [],
   build: {
     target: 'esnext',
   },
@@ -15,7 +13,7 @@ export default defineConfig({
   },
   server: {
     headers: {
-      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Embedder-Policy': 'credentialless',
       'Cross-Origin-Opener-Policy': 'same-origin',
     },
   },
