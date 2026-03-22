@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FoodScan 3D — Volume Estimator</title>
+  <meta name="description" content="Upload food photos and get accurate 3D reconstructions with per-ingredient volume estimation. AI-powered depth mapping and segmentation." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header id="app-header">
+      <div class="header-left">
+        <div class="logo">
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+            <defs>
+              <linearGradient id="logo-grad" x1="0" y1="0" x2="32" y2="32">
+                <stop offset="0%" stop-color="#6366f1" />
+                <stop offset="100%" stop-color="#a855f7" />
+              </linearGradient>
+            </defs>
+            <rect width="32" height="32" rx="8" fill="url(#logo-grad)" />
+            <path d="M8 20 Q16 8 24 20" stroke="white" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+            <circle cx="16" cy="18" r="4" fill="white" opacity="0.9"/>
+          </svg>
+        </div>
+        <h1>FoodScan <span class="accent">3D</span></h1>
+      </div>
+      <p class="tagline">AI-Powered Food Volume Estimation</p>
+    </header>
+
+    <!-- Upload Screen -->
+    <section id="upload-screen" class="screen active">
+      <div class="upload-container">
+        <div id="drop-zone" class="drop-zone">
+          <div class="drop-zone-content">
+            <div class="upload-icon">
+              <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+                <circle cx="32" cy="32" r="30" stroke="url(#logo-grad)" stroke-width="2" stroke-dasharray="6 4" opacity="0.5"/>
+                <path d="M32 20V44M24 28L32 20L40 28" stroke="url(#logo-grad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <h2>Drop your food photos here</h2>
+            <p>or click to browse • supports JPG, PNG, WebP</p>
+            <div class="upload-hint">
+              <span class="badge">💡 Tip</span> Multiple angles give better 3D results
+            </div>
+          </div>
+          <input type="file" id="file-input" accept="image/*" multiple hidden />
+        </div>
+
+        <!-- Image Thumbnails -->
+        <div id="thumbnails" class="thumbnails hidden"></div>
+
+        <!-- Scale Reference -->
+        <div id="scale-section" class="scale-section hidden">
+          <div class="scale-card glass-panel">
+            <h3>📏 Scale Reference</h3>
+            <p>Enter the plate/bowl diameter for accurate volume</p>
+            <div class="scale-input-group">
+              <input type="number" id="plate-diameter" value="26" min="10" max="50" step="0.5" />
+              <span class="unit">cm</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Process Button -->
+        <button id="process-btn" class="process-btn hidden">
+          <span class="btn-text">Generate 3D Model</span>
+          <span class="btn-icon">→</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Processing Screen -->
+    <section id="processing-screen" class="screen">
+      <div class="processing-container">
+        <div class="processing-visual">
+          <div class="pulse-ring"></div>
+          <div class="pulse-ring delay-1"></div>
+          <div class="pulse-ring delay-2"></div>
+          <div class="processing-icon">🔬</div>
+        </div>
+        <h2 id="processing-title">Analyzing Food...</h2>
+        <div class="progress-bar-container">
+          <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+        </div>
+        <p id="processing-status" class="processing-status">Initializing AI models...</p>
+        <div id="processing-steps" class="processing-steps">
+          <div class="step" data-step="depth">
+            <span class="step-indicator"></span>
+            <span>Depth estimation</span>
+          </div>
+          <div class="step" data-step="segment">
+            <span class="step-indicator"></span>
+            <span>Ingredient segmentation</span>
+          </div>
+          <div class="step" data-step="mesh">
+            <span class="step-indicator"></span>
+            <span>3D mesh generation</span>
+          </div>
+          <div class="step" data-step="volume">
+            <span class="step-indicator"></span>
+            <span>Volume calculation</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3D Viewer Screen -->
+    <section id="viewer-screen" class="screen">
+      <div class="viewer-layout">
+        <!-- 3D Canvas -->
+        <div id="viewer-panel" class="viewer-panel">
+          <canvas id="three-canvas"></canvas>
+          <div id="volume-overlay" class="volume-overlay glass-panel">
+            <span class="label">Total Volume</span>
+            <span id="total-vol" class="value">—</span>
+          </div>
+          <div id="viewer-controls" class="viewer-controls glass-panel">
+            <button id="btn-rotate" class="ctrl-btn active" title="Rotate">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.2-8.5"/><path d="M21 3v5h-5"/></svg>
+            </button>
+            <button id="btn-wireframe" class="ctrl-btn" title="Wireframe">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 12h18M12 3v18"/></svg>
+            </button>
+            <button id="btn-segments" class="ctrl-btn active" title="Show Segments">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8"/></svg>
+            </button>
+            <button id="btn-reset" class="ctrl-btn" title="Reset View">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 109-9"/><path d="M3 3v5h5"/></svg>
+            </button>
+            <div class="ctrl-divider"></div>
+            <button id="btn-back" class="ctrl-btn" title="Scan Another">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+            </button>
+          </div>
+          <div id="click-hint" class="click-hint glass-panel">
+            <span>🖱️ Click on the model to inspect ingredient volumes</span>
+          </div>
+        </div>
+
+        <!-- Info Sidebar -->
+        <aside id="info-sidebar" class="info-sidebar glass-panel">
+          <div class="sidebar-header">
+            <h2>Ingredients</h2>
+          </div>
+          <div id="ingredient-list" class="ingredient-list"></div>
+          <div id="selected-info" class="selected-info hidden">
+            <h3>Selected Ingredient</h3>
+            <div id="selected-detail" class="selected-detail"></div>
+          </div>
+
+          <!-- 3D Model Tuning Panel -->
+          <div id="tuning-panel" class="tuning-panel">
+            <button id="tuning-toggle" class="tuning-toggle">
+              <span>⚙️ 3D Tuning</span>
+              <span class="toggle-arrow">▾</span>
+            </button>
+            <div id="tuning-controls" class="tuning-controls">
+              <div class="tune-group">
+                <label>Depth Model</label>
+                <select id="tune-depth-model" class="tune-select">
+                  <option value="depth-anything-v2-small">Depth Anything v2 Small (fast)</option>
+                  <option value="depth-anything-v2-base">Depth Anything v2 Base (better)</option>
+                </select>
+                <div class="tune-hint">Changing model re-runs depth estimation</div>
+              </div>
+              <div class="tune-group">
+                <label>Mesh Method</label>
+                <select id="tune-mesh-method" class="tune-select">
+                  <option value="displacement">Displacement Grid</option>
+                  <option value="pointcloud">Point Cloud</option>
+                </select>
+              </div>
+              <div class="tune-group">
+                <label>Mask Method</label>
+                <select id="tune-mask-method" class="tune-select">
+                  <option value="histogram">Histogram Mode</option>
+                  <option value="otsu">Otsu Threshold</option>
+                  <option value="fixed">Fixed Depth Cutoff</option>
+                </select>
+              </div>
+              <hr class="tune-divider" />
+              <div class="tune-group">
+                <label>Mask Cutoff <span id="val-cutoff" class="tune-val">0.15</span></label>
+                <input type="range" id="tune-cutoff" min="0" max="0.5" step="0.01" value="0.15" />
+                <div class="tune-hint">Higher = less background included</div>
+              </div>
+              <div class="tune-group">
+                <label>Depth Scale <span id="val-depthscale" class="tune-val">0.30</span></label>
+                <input type="range" id="tune-depthscale" min="0.05" max="1.0" step="0.01" value="0.30" />
+                <div class="tune-hint">Controls the height exaggeration</div>
+              </div>
+              <div class="tune-group">
+                <label>Smoothing <span id="val-smoothing" class="tune-val">2</span></label>
+                <input type="range" id="tune-smoothing" min="0" max="6" step="1" value="2" />
+                <div class="tune-hint">Blur passes for smoother surfaces</div>
+              </div>
+              <div class="tune-group">
+                <label>Edge Taper <span id="val-taper" class="tune-val">5</span></label>
+                <input type="range" id="tune-taper" min="0" max="15" step="1" value="5" />
+                <div class="tune-hint">Smooth edges at food boundary</div>
+              </div>
+              <div class="tune-group tune-toggles">
+                <label class="tune-checkbox">
+                  <input type="checkbox" id="tune-walls" checked />
+                  <span>Side Walls</span>
+                </label>
+                <label class="tune-checkbox">
+                  <input type="checkbox" id="tune-bottom" checked />
+                  <span>Bottom Cap</span>
+                </label>
+              </div>
+              <button id="tune-apply" class="tune-apply-btn">Regenerate Model</button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
