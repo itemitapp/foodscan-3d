@@ -181,12 +181,19 @@
               <div class="tune-group">
                 <label>Mask Method</label>
                 <select id="tune-mask-method" class="tune-select">
+                  <option value="clipseg">AI Food Detection (CLIPSeg)</option>
                   <option value="histogram">Histogram Mode</option>
                   <option value="otsu">Otsu Threshold</option>
                   <option value="fixed">Fixed Depth Cutoff</option>
                 </select>
               </div>
               <hr class="tune-divider" />
+              <div class="tune-group">
+                <div class="tune-checkbox">
+                  <label><input type="checkbox" id="tune-autolevel" checked> Auto-level plate</label>
+                </div>
+                <div class="tune-hint">Corrects for camera angle</div>
+              </div>
               <div class="tune-group">
                 <label>Mask Cutoff <span id="val-cutoff" class="tune-val">0.15</span></label>
                 <input type="range" id="tune-cutoff" min="0" max="0.5" step="0.01" value="0.15" />

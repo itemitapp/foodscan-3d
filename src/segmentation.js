@@ -3,6 +3,78 @@
  * K-means color clustering + depth edge detection for ingredient separation
  */
 
+/**
+ * Estimate plate tilt from the depth map and return corrected depth values.
+ * Fits a plane to the non-food (background) depth values and subtracts it,
+ * so depth represents height above the plate surface rather than distance to camera.
+ */
+export function correctPlateOrientation(depthData, foodMask, width, height) {
+  // Collect background (non-food) depth samples for plane fitting
+  const samples = [];
+  const step = Math.max(1, Math.floor(width * height / 2000)); // max ~2000 samples
+  for (let i = 0; i < width * height; i += step) {
+    if (!foodMask[i] && isFinite(depthData[i]) && depthData[i] > 0) {
+      const x = i % width;
+      const y = Math.floor(i / width);
+      samples.push({ x, y, z: depthData[i] });
+    }
+  }
+  
+  if (samples.length < 10) {
+    // Not enough background samples, return copy unchanged
+    return new Float32Array(depthData);
+  }
+  
+  // Fit a plane z = ax + by + c using least squares
+  let sumX = 0, sumY = 0, sumZ = 0;
+  let sumXX = 0, sumXY = 0, sumYY = 0;
+  let sumXZ = 0, sumYZ = 0;
+  const n = samples.length;
+  
+  for (const s of samples) {
+    sumX += s.x; sumY += s.y; sumZ += s.z;
+    sumXX += s.x * s.x; sumXY += s.x * s.y; sumYY += s.y * s.y;
+    sumXZ += s.x * s.z; sumYZ += s.y * s.z;
+  }
+  
+  // Solve 3x3 system for [a, b, c]
+  const A = [
+    [sumXX, sumXY, sumX],
+    [sumXY, sumYY, sumY],
+    [sumX,  sumY,  n   ],
+  ];
+  const B = [sumXZ, sumYZ, sumZ];
+  
+  // Cramer's rule for 3x3
+  const det = (m) => 
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+    m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+    m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  
+  const D = det(A);
+  if (Math.abs(D) < 1e-10) return new Float32Array(depthData);
+  
+  const Dx = det([[B[0], A[0][1], A[0][2]], [B[1], A[1][1], A[1][2]], [B[2], A[2][1], A[2][2]]]);
+  const Dy = det([[A[0][0], B[0], A[0][2]], [A[1][0], B[1], A[1][2]], [A[2][0], B[2], A[2][2]]]);
+  const Dc = det([[A[0][0], A[0][1], B[0]], [A[1][0], A[1][1], B[1]], [A[2][0], A[2][1], B[2]]]);
+  
+  const a = Dx / D;
+  const b = Dy / D;
+  const c = Dc / D;
+  
+  // Subtract the fitted plane from all depth values
+  // This makes food height relative to the plate surface
+  const corrected = new Float32Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    const x = i % width;
+    const y = Math.floor(i / width);
+    const planeZ = a * x + b * y + c;
+    corrected[i] = depthData[i] - planeZ;
+  }
+  
+  return corrected;
+}
+
 // Predefined food color names with heuristic labels
 const FOOD_COLOR_LABELS = [
   { range: [0, 30], label: 'Red/Tomato' },
@@ -392,11 +464,43 @@ const SEGMENT_COLORS = [
  * Main segmentation function
  * @returns {object} segments with labels, colors, masks, pixel counts
  */
-export function segmentIngredients(imageData, width, height, depthData, depthWidth, depthHeight, numSegments = 6, maskCutoff = 0.15, maskMethod = 'histogram') {
-  // 1. Detect food region using depth
-  const { mask: foodMask, resizedDepth } = detectFoodRegion(
-    imageData, depthData, width, height, depthWidth, depthHeight, maskCutoff, maskMethod
-  );
+export function segmentIngredients(imageData, width, height, depthData, depthWidth, depthHeight, numSegments = 6, maskCutoff = 0.15, maskMethod = 'histogram', externalMask = null) {
+  let foodMask, resizedDepth;
+  
+  if (maskMethod === 'clipseg' && externalMask) {
+    // Use the externally provided CLIPSeg mask
+    // Resize CLIPSeg mask to match image dimensions
+    const { mask: clipMask, maskWidth, maskHeight } = externalMask;
+    foodMask = new Uint8Array(width * height);
+    const xRatio = maskWidth / width;
+    const yRatio = maskHeight / height;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const sx = Math.min(Math.floor(x * xRatio), maskWidth - 1);
+        const sy = Math.min(Math.floor(y * yRatio), maskHeight - 1);
+        const prob = clipMask[sy * maskWidth + sx];
+        foodMask[y * width + x] = prob > 0.5 ? 1 : 0; // threshold at 0.5
+      }
+    }
+    // Resize depth to match image
+    resizedDepth = new Float32Array(width * height);
+    const dxRatio = depthWidth / width;
+    const dyRatio = depthHeight / height;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const sx = Math.min(Math.floor(x * dxRatio), depthWidth - 1);
+        const sy = Math.min(Math.floor(y * dyRatio), depthHeight - 1);
+        resizedDepth[y * width + x] = depthData[sy * depthWidth + sx];
+      }
+    }
+  } else {
+    // Use depth-based food region detection
+    const result = detectFoodRegion(
+      imageData, depthData, width, height, depthWidth, depthHeight, maskCutoff, maskMethod
+    );
+    foodMask = result.mask;
+    resizedDepth = result.resizedDepth;
+  }
   
   // 2. Collect food pixels for clustering
   const foodPixels = [];

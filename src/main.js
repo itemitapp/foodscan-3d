@@ -5,7 +5,7 @@
 
 import './style.css';
 import { SceneManager } from './scene.js';
-import { segmentIngredients } from './segmentation.js';
+import { segmentIngredients, correctPlateOrientation } from './segmentation.js';
 import { generateMesh, highlightSegment } from './mesh-generator.js';
 import { calculateVolumes, formatVolume, estimateCalories } from './volume-calculator.js';
 
@@ -24,6 +24,7 @@ const state = {
   cachedImageData: null,
   cachedDepthResult: null,
   cachedModelName: 'depth-anything-v2-small',
+  cachedClipSegResult: null,
 };
 
 // ---- DOM Elements ----
@@ -162,16 +163,24 @@ async function startProcessing() {
     const imageData = await loadImageData(img.url);
     state.cachedImageData = imageData;
     
-    // Step 2: Depth estimation
-    setProgress(10, 'Loading AI depth model (first time may take 30-60s)...');
+    // Step 2: Depth estimation + CLIPSeg in parallel
+    setProgress(10, 'Loading AI models (first time may take 30-60s)...');
     
-    const depthResult = await runDepthEstimation(imageData, (progress) => {
-      setProgress(10 + progress * 40, 'Running depth estimation...');
+    const depthPromise = runDepthEstimation(imageData, (progress) => {
+      setProgress(10 + progress * 35, 'Running depth estimation...');
     });
     
+    const clipSegPromise = runClipSegWorker(imageData).catch(err => {
+      console.warn('CLIPSeg failed, will use depth-based masking:', err);
+      return null;
+    });
+    
+    const [depthResult, clipSegResult] = await Promise.all([depthPromise, clipSegPromise]);
+    
     state.cachedDepthResult = depthResult;
+    state.cachedClipSegResult = clipSegResult;
     setStep('depth', 'done');
-    setProgress(50, 'Depth estimation complete');
+    setProgress(50, 'AI analysis complete');
     
     // Step 3: Segmentation
     setStep('segment', 'active');
@@ -179,14 +188,21 @@ async function startProcessing() {
     
     await sleep(100); // Allow UI to update
     
+    // Apply plate orientation correction if auto-level is checked
+    let depthForSeg = depthResult.depth;
+    const autoLevel = $('tune-autolevel') && $('tune-autolevel').checked;
+    
     const segResult = segmentIngredients(
       imageData.data,
       imageData.width,
       imageData.height,
-      depthResult.depth,
+      depthForSeg,
       depthResult.width,
       depthResult.height,
-      6
+      6,
+      0.15,
+      clipSegResult ? 'clipseg' : 'histogram',
+      clipSegResult
     );
     
     state.segments = segResult.segments;
@@ -306,6 +322,47 @@ async function runDepthEstimation(imageData, onProgress, modelName = 'depth-anyt
       width: imageData.width,
       height: imageData.height,
       modelName: modelName,
+    }, [buffer]);
+  });
+}
+
+async function runClipSegWorker(imageData) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(
+      new URL('./workers/seg-worker.js', import.meta.url),
+      { type: 'module' }
+    );
+    
+    worker.onmessage = (e) => {
+      const { type } = e.data;
+      
+      if (type === 'status') {
+        console.log('CLIPSeg worker:', e.data.message);
+      } else if (type === 'result') {
+        worker.terminate();
+        resolve({
+          mask: new Float32Array(e.data.mask),
+          maskWidth: e.data.maskWidth,
+          maskHeight: e.data.maskHeight,
+        });
+      } else if (type === 'error') {
+        worker.terminate();
+        reject(new Error(e.data.message));
+      }
+    };
+    
+    worker.onerror = (error) => {
+      worker.terminate();
+      reject(error);
+    };
+    
+    // Send image data to worker
+    const buffer = imageData.data.buffer.slice(0);
+    worker.postMessage({
+      type: 'segment',
+      imageData: buffer,
+      width: imageData.width,
+      height: imageData.height,
     }, [buffer]);
   });
 }
@@ -546,6 +603,14 @@ async function regenerateModel() {
       state.cachedModelName = depthModel;
     }
     
+    // Run CLIPSeg if needed and not cached
+    if (maskMethod === 'clipseg' && !state.cachedClipSegResult) {
+      applyBtn.textContent = 'Running food detection...';
+      state.cachedClipSegResult = await runClipSegWorker(imageData);
+    }
+    
+    const autoLevel = $('tune-autolevel') && $('tune-autolevel').checked;
+    
     // Re-run segmentation with new cutoff and mask method
     const segResult = segmentIngredients(
       imageData.data,
@@ -556,7 +621,8 @@ async function regenerateModel() {
       depthResult.height,
       6,
       maskCutoff,
-      maskMethod
+      maskMethod,
+      maskMethod === 'clipseg' ? state.cachedClipSegResult : null
     );
     state.segments = segResult.segments;
     
