@@ -21,6 +21,7 @@ const state = {
   plateDiameter: 26,
   showSegments: true,
   showWireframe: false,
+  backendGlbLoaded: false, // true when backend GLB is already in the scene
   // Cached data for tuning panel regeneration
   cachedImageData: null,
   cachedDepthResult: null,
@@ -182,6 +183,7 @@ async function startProcessing() {
       setProgress(100, 'Done!');
       titleText.textContent = 'Complete!';
       await sleep(400);
+      state.backendGlbLoaded = true;
       showViewer();
       return; // Done — skip browser pipeline
     } catch (err) {
@@ -427,8 +429,10 @@ function showViewer() {
     state.sceneManager = new SceneManager(canvas);
   }
   
-  // Set model
-  state.sceneManager.setFoodModel(state.foodGroup);
+  // Only set browser-generated mesh if not using backend GLB
+  if (!state.backendGlbLoaded && state.foodGroup) {
+    state.sceneManager.setFoodModel(state.foodGroup);
+  }
   state.sceneManager.resize();
   
   // Setup click callback
