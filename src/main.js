@@ -8,6 +8,7 @@ import { SceneManager } from './scene.js';
 import { segmentIngredients, correctPlateOrientation } from './segmentation.js';
 import { generateMesh, highlightSegment } from './mesh-generator.js';
 import { calculateVolumes, formatVolume, estimateCalories } from './volume-calculator.js';
+import { checkBackend, reconstructWithBackend, getGlbUrl, isBackendAvailable } from './backend.js';
 
 // ---- State ----
 const state = {
@@ -137,13 +138,62 @@ async function startProcessing() {
   const progressBar = $('progress-bar');
   const statusText = $('processing-status');
   const titleText = $('processing-title');
-  const steps = $('processing-steps').querySelectorAll('.step');
-  
+
   function setProgress(pct, status) {
     progressBar.style.width = `${pct}%`;
     statusText.textContent = status;
   }
-  
+
+  // ── Backend-first path (MapAnything) ──────────────────────────────────────
+  if (isBackendAvailable()) {
+    try {
+      titleText.textContent = 'Metric 3D Reconstruction...';
+      setProgress(5, 'Connecting to local AI engine...');
+
+      const imageFiles = state.images.map(img => img.file).filter(Boolean);
+
+      const result = await reconstructWithBackend(
+        imageFiles,
+        state.plateDiameter,
+        (msg) => setProgress(50, msg)
+      );
+
+      setProgress(80, 'Building 3D scene...');
+
+      // Load the GLB from the backend
+      const glbUrl = getGlbUrl(result.glb_url);
+      if (!state.sceneManager) {
+        const canvas = $('three-canvas');
+        state.sceneManager = new SceneManager(canvas);
+      }
+      await state.sceneManager.loadGlb(glbUrl);
+      state.sceneManager.resize();
+
+      // Populate state from backend response
+      state.segments = result.segments.map(s => ({
+        id: s.id,
+        label: s.label,
+        color: s.color,
+        percentage: s.percentage || 0,
+      }));
+      state.volumes = {};
+      result.segments.forEach(s => { state.volumes[s.id] = s.volume_ml; });
+
+      setProgress(100, 'Done!');
+      titleText.textContent = 'Complete!';
+      await sleep(400);
+      showViewer();
+      return; // Done — skip browser pipeline
+    } catch (err) {
+      console.warn('Backend failed, falling back to browser pipeline:', err);
+      setProgress(0, 'Falling back to browser AI...');
+      titleText.textContent = 'Analyzing Food...';
+    }
+  }
+
+  // ── Browser-only fallback pipeline ───────────────────────────────────────
+  const steps = $('processing-steps').querySelectorAll('.step');
+
   function setStep(stepName, state) {
     steps.forEach(s => {
       if (s.dataset.step === stepName) {
@@ -655,6 +705,27 @@ function sleep(ms) {
 }
 
 // ---- Init ----
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   initUpload();
+
+  // Check if local MapAnything backend is running
+  const backendStatus = await checkBackend();
+
+  // Inject backend status badge into header
+  const header = document.getElementById('app-header');
+  if (header) {
+    const badge = document.createElement('div');
+    badge.id = 'backend-badge';
+    badge.style.cssText = `
+      display:flex;align-items:center;gap:6px;padding:4px 12px;
+      border-radius:20px;font-size:12px;font-weight:600;
+      ${ backendStatus.available
+          ? 'background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);'
+          : 'background:rgba(99,102,241,0.15);color:#6366f1;border:1px solid rgba(99,102,241,0.3);' }
+    `;
+    badge.innerHTML = backendStatus.available
+      ? `<span>🟢</span><span>MapAnything AI Active (${backendStatus.device?.toUpperCase()})</span>`
+      : `<span>🔵</span><span>Browser AI Mode</span>`;
+    header.appendChild(badge);
+  }
 });

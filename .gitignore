@@ -16,3 +16,6 @@ dist/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+venv/
+backend/output/
+backend/map-anything/.git

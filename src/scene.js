@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 export class SceneManager {
   constructor(canvas) {
@@ -126,6 +127,41 @@ export class SceneManager {
     this.camera.position.set(center.x, center.y + maxDim * 0.8, center.z + cameraZ);
     this.controls.target.copy(center);
     this.controls.update();
+  }
+
+  /**
+   * Load a GLB file from the MapAnything backend and display it in the scene.
+   * @param {string} url - Absolute URL to the GLB file
+   */
+  async loadGlb(url) {
+    return new Promise((resolve, reject) => {
+      const loader = new GLTFLoader();
+      loader.load(
+        url,
+        (gltf) => {
+          if (this.foodGroup) {
+            this.scene.remove(this.foodGroup);
+          }
+          this.foodGroup = gltf.scene;
+          this.scene.add(gltf.scene);
+
+          // Auto-fit camera to the loaded model
+          const box = new THREE.Box3().setFromObject(gltf.scene);
+          const size = box.getSize(new THREE.Vector3());
+          const center = box.getCenter(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z) || 1;
+          const fov = this.camera.fov * (Math.PI / 180);
+          const cameraZ = maxDim / (2 * Math.tan(fov / 2)) * 2;
+
+          this.camera.position.set(center.x, center.y + maxDim, center.z + cameraZ);
+          this.controls.target.copy(center);
+          this.controls.update();
+          resolve();
+        },
+        undefined,
+        reject
+      );
+    });
   }
   
   handleClick(event) {
