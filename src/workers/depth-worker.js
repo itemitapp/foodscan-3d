@@ -11,7 +11,7 @@ env.allowLocalModels = false;
 let depthEstimators = {}; // cache by model name
 let currentModelName = null;
 
-async function loadModel(modelName = 'depth-anything-v2-small') {
+async function loadModel(modelName = 'depth-anything-small') {
   const fullName = `onnx-community/${modelName}`;
   if (depthEstimators[fullName]) {
     currentModelName = fullName;
