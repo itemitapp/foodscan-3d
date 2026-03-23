@@ -23,7 +23,7 @@ const state = {
   // Cached data for tuning panel regeneration
   cachedImageData: null,
   cachedDepthResult: null,
-  cachedModelName: 'depth-anything-small',
+  cachedModelName: 'depth-anything-v2-small',
 };
 
 // ---- DOM Elements ----
@@ -261,7 +261,7 @@ async function loadImageData(url) {
   });
 }
 
-async function runDepthEstimation(imageData, onProgress, modelName = 'depth-anything-small') {
+async function runDepthEstimation(imageData, onProgress, modelName = 'depth-anything-v2-small') {
   return new Promise((resolve, reject) => {
     // Create worker
     const worker = new Worker(
