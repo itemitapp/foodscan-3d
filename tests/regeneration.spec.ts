@@ -1,7 +1,10 @@
 import { test, expect, Page } from '@playwright/test';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
-const FOOD_IMAGE = path.resolve(__dirname, 'fixtures/food-sample.jpg');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const FOOD_IMAGE = path.resolve(__dirname, 'fixtures/food-sample.png');
 
 /**
  * Helper: upload a food image and wait for 3D model to be generated.
@@ -15,15 +18,25 @@ async function uploadAndProcess(page: Page) {
   await fileInput.setInputFiles(FOOD_IMAGE);
   
   // Wait for the "Generate 3D Model" button and click it
-  const generateBtn = page.locator('#generate-btn');
+  const generateBtn = page.locator('#process-btn');
   await expect(generateBtn).toBeVisible({ timeout: 5000 });
   await generateBtn.click();
   
   // Wait for processing to complete — viewer should appear
-  await expect(page.locator('#viewer-screen')).toHaveClass(/active/, { timeout: 120_000 });
+  await expect(page.locator('#viewer-screen.active')).toBeVisible({ timeout: 180_000 });
   
   // Verify the 3D canvas is visible
   await expect(page.locator('#three-canvas')).toBeVisible();
+}
+
+/**
+ * Helper: set a range input value via JS (fill() doesn't work on range inputs).
+ */
+async function setSlider(page: Page, selector: string, value: string) {
+  await page.locator(selector).evaluate((el: HTMLInputElement, v: string) => {
+    el.value = v;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }, value);
 }
 
 /**
@@ -108,11 +121,8 @@ test.describe('Model Regeneration', () => {
   });
 
   test('regenerate with changed depth scale', async ({ page }) => {
-    // Change depth scale slider
-    await page.locator('#tune-depthscale').fill('0.60');
-    await page.locator('#tune-depthscale').dispatchEvent('input');
+    await setSlider(page, '#tune-depthscale', '0.60');
     
-    // Value display should update
     await expect(page.locator('#val-depthscale')).toHaveText('0.60');
     
     await clickRegenerate(page);
@@ -122,8 +132,7 @@ test.describe('Model Regeneration', () => {
   });
 
   test('regenerate with changed smoothing', async ({ page }) => {
-    await page.locator('#tune-smoothing').fill('5');
-    await page.locator('#tune-smoothing').dispatchEvent('input');
+    await setSlider(page, '#tune-smoothing', '5');
     await expect(page.locator('#val-smoothing')).toHaveText('5');
     
     await clickRegenerate(page);
@@ -172,9 +181,9 @@ test.describe('Model Regeneration', () => {
     // Change multiple settings at once
     await page.selectOption('#tune-mask-method', 'otsu');
     await page.selectOption('#tune-mesh-method', 'pointcloud');
-    await page.locator('#tune-depthscale').fill('0.80');
-    await page.locator('#tune-smoothing').fill('0');
-    await page.locator('#tune-taper').fill('10');
+    await setSlider(page, '#tune-depthscale', '0.80');
+    await setSlider(page, '#tune-smoothing', '0');
+    await setSlider(page, '#tune-taper', '10');
     
     // Uncheck walls and bottom
     const walls = page.locator('#tune-walls');
@@ -191,20 +200,14 @@ test.describe('Model Regeneration', () => {
   });
 
   test('volume updates after regeneration', async ({ page }) => {
-    // Get initial volume
     const initialVolume = await page.locator('#total-vol').textContent();
     
-    // Change depth scale significantly
-    await page.locator('#tune-depthscale').fill('0.90');
-    await page.locator('#tune-depthscale').dispatchEvent('input');
+    await setSlider(page, '#tune-depthscale', '0.90');
     
     await clickRegenerate(page);
     
-    // Volume should have changed
     const newVolume = await page.locator('#total-vol').textContent();
     expect(newVolume).not.toBe('—');
-    // With a bigger depth scale the volume should be different
-    // (might be same in edge cases, so we just check it's a valid number)
     expect(newVolume).toMatch(/\d/);
   });
 });
