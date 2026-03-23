@@ -234,7 +234,10 @@ async function startProcessing() {
 async function loadImageData(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.crossOrigin = 'anonymous';
+    // Only set crossOrigin for non-blob URLs (blob URLs are same-origin)
+    if (!url.startsWith('blob:')) {
+      img.crossOrigin = 'anonymous';
+    }
     img.onload = () => {
       // Limit size for processing
       const maxSize = 512;
@@ -253,7 +256,7 @@ async function loadImageData(url) {
       const data = ctx.getImageData(0, 0, w, h);
       resolve(data);
     };
-    img.onerror = reject;
+    img.onerror = (e) => reject(new Error('Failed to load image: ' + (e.message || url)));
     img.src = url;
   });
 }
