@@ -144,8 +144,8 @@
           </div>
         </div>
 
-        <!-- Info Sidebar -->
-        <aside id="info-sidebar" class="info-sidebar glass-panel">
+        <!-- Left Sidebar: Ingredients -->
+        <aside id="info-sidebar" class="info-sidebar glass-panel sidebar-left">
           <div class="sidebar-header">
             <h2>Ingredients</h2>
           </div>
@@ -154,14 +154,15 @@
             <h3>Selected Ingredient</h3>
             <div id="selected-detail" class="selected-detail"></div>
           </div>
+        </aside>
 
-          <!-- 3D Model Tuning Panel -->
-          <div id="tuning-panel" class="tuning-panel">
-            <button id="tuning-toggle" class="tuning-toggle">
-              <span>⚙️ 3D Tuning</span>
-              <span class="toggle-arrow">▾</span>
-            </button>
-            <div id="tuning-controls" class="tuning-controls">
+        <!-- Right Sidebar: 3D Tuning -->
+        <aside id="tuning-sidebar" class="tuning-sidebar glass-panel">
+          <div id="tuning-panel" class="tuning-panel tuning-panel-open">
+            <div class="sidebar-header">
+              <h2>⚙️ 3D Tuning</h2>
+            </div>
+            <div id="tuning-controls" class="tuning-controls" style="display: block;">
               <div class="tune-group">
                 <label>Depth Model</label>
                 <select id="tune-depth-model" class="tune-select">

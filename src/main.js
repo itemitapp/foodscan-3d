@@ -541,14 +541,7 @@ function initViewerControls() {
 
 // ---- Tuning Panel ----
 function initTuningPanel() {
-  const panel = $('tuning-panel');
-  const toggle = $('tuning-toggle');
   const applyBtn = $('tune-apply');
-  
-  // Toggle collapse
-  toggle.addEventListener('click', () => {
-    panel.classList.toggle('collapsed');
-  });
   
   // Live value display for sliders
   const sliders = [
