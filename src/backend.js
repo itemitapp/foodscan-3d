@@ -32,14 +32,22 @@ export function isBackendAvailable() {
  * @param {File[]} imageFiles - Array of File objects
  * @param {number} plateDiameterCm - Plate diameter in centimeters
  * @param {function(string)} onStatus - Status update callback
+ * @param {object} config - MapAnything configuration overrides
  * @returns {Promise<{glb_url, total_volume_ml, segments, job_id}>}
  */
-export async function reconstructWithBackend(imageFiles, plateDiameterCm, onStatus) {
+export async function reconstructWithBackend(imageFiles, plateDiameterCm, onStatus, config = {}) {
   const form = new FormData();
   for (const f of imageFiles) {
     form.append('images', f);
   }
   form.append('plate_diameter_cm', String(plateDiameterCm));
+
+  // MapAnything config params
+  form.append('segments',           String(config.segments           ?? 0));
+  form.append('min_food_height_mm', String(config.minFoodHeightMm   ?? 3.0));
+  form.append('memory_efficient',   String(config.memoryEfficient    ?? true));
+  form.append('minibatch_size',     String(config.minibatchSize      ?? 1));
+  form.append('mask_edges',         String(config.maskEdges          ?? true));
 
   onStatus?.(`Sending ${imageFiles.length} photo(s) to local AI engine...`);
 

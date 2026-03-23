@@ -23,6 +23,8 @@ def compute_food_volumes(
     pointcloud: np.ndarray,  # (N, 3) metric coords in meters
     colors: np.ndarray,      # (N, 3) RGB 0-1
     plate_diameter_cm: float = 26.0,
+    segments: int = 0,       # 0 = auto; 1-8 = fixed number of regions
+    min_food_height_mm: float = 3.0,  # min height above plate to count as food
 ) -> Dict[str, Any]:
     """
     1. Fit a plate plane using RANSAC
@@ -35,6 +37,7 @@ def compute_food_volumes(
         return {"total_volume_ml": 0.0, "segments": []}
 
     plate_radius_m = (plate_diameter_cm / 2.0) / 100.0  # cm → m
+    min_height_m   = max(0.0005, min_food_height_mm / 1000.0)  # mm → m
 
     # Step 1: Fit the plate plane via RANSAC
     plate_normal, plate_d = fit_plane_ransac(pointcloud)
@@ -67,7 +70,7 @@ def compute_food_volumes(
     dist_from_center = np.sqrt((proj_x - cx)**2 + (proj_y - cy)**2)
 
     # Food points: above the plate AND within plate radius
-    above_mask = (heights > 0.003) & (dist_from_center < plate_radius_m)
+    above_mask = (heights > min_height_m) & (dist_from_center < plate_radius_m)
     food_pts    = pointcloud[above_mask]
     food_x      = proj_x[above_mask]
     food_y      = proj_y[above_mask]
@@ -92,7 +95,11 @@ def compute_food_volumes(
     # Step 4: Cluster food by colour+position (KMeans)
     try:
         from sklearn.cluster import KMeans
-        k = min(6, max(1, len(food_pts) // 500))
+        # 0 = auto: choose k based on point count; otherwise use fixed value
+        if segments and 1 <= segments <= 8:
+            k = segments
+        else:
+            k = min(6, max(1, len(food_pts) // 500))
         features = np.hstack([
             food_colors * 2.0,           # colour weight
             food_x[:, None] * 3.0,       # position weight

@@ -156,7 +156,8 @@ async function startProcessing() {
       const result = await reconstructWithBackend(
         imageFiles,
         state.plateDiameter,
-        (msg) => setProgress(50, msg)
+        (msg) => setProgress(50, msg),
+        readBackendConfig(),
       );
 
       setProgress(80, 'Building 3D scene...');
@@ -593,11 +594,30 @@ function initViewerControls() {
   });
 }
 
+// ---- Backend config helpers ----
+function readBackendConfig() {
+  const g = (id, fallback) => {
+    const el = document.getElementById(id);
+    return el ? el.value : fallback;
+  };
+  const gc = (id, fallback) => {
+    const el = document.getElementById(id);
+    return el ? el.checked : fallback;
+  };
+  return {
+    segments:         parseInt(g('cfg-segments', '0'))        || 0,
+    minFoodHeightMm:  parseFloat(g('cfg-min-height', '3'))   || 3,
+    memoryEfficient:  gc('cfg-memory-efficient', true),
+    minibatchSize:    parseInt(g('cfg-minibatch', '1'))       || 1,
+    maskEdges:        gc('cfg-mask-edges', true),
+  };
+}
+
 // ---- Tuning Panel ----
 function initTuningPanel() {
   const tuningControls = $('tuning-controls');
 
-  // ── Backend mode: replace browser controls with MapAnything info panel ──
+  // ── Backend mode: replace browser controls with MapAnything config panel ──
   if (state.backendGlbLoaded) {
     tuningControls.innerHTML = `
       <div style="padding:8px 0 16px;">
@@ -608,10 +628,7 @@ function initTuningPanel() {
             <div style="font-size:11px;color:var(--text-muted);">Metric 3D reconstruction on MPS</div>
           </div>
         </div>
-        <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:16px;">
-          Depth estimation, mesh generation, and segmentation are handled
-          by the local MapAnything model — browser controls are not used.
-        </div>
+
         <div class="tune-group">
           <label>Plate diameter</label>
           <div style="display:flex;align-items:center;gap:8px;">
@@ -622,27 +639,79 @@ function initTuningPanel() {
             <span style="font-size:12px;color:var(--text-muted);">cm</span>
           </div>
         </div>
-        <button id="tune-apply" class="tune-apply-btn" style="margin-top:8px;">
+
+        <div class="tune-group">
+          <label>Food segments</label>
+          <select id="cfg-segments" class="tune-select">
+            <option value="0">Auto-detect</option>
+            <option value="1">1 — Single item</option>
+            <option value="2">2 — Two items</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+          </select>
+          <div class="tune-hint">Number of food regions to segment</div>
+        </div>
+
+        <div class="tune-group">
+          <label>Min height above plate <span class="tune-val" id="val-min-height">3</span> mm</label>
+          <input type="range" id="cfg-min-height" min="1" max="20" step="0.5" value="3" />
+          <div class="tune-hint">Lower = detect thinner foods (sauces, flatbreads)</div>
+        </div>
+
+        <hr class="tune-divider" />
+
+        <div class="tune-group">
+          <label>Speed vs memory</label>
+          <select id="cfg-minibatch" class="tune-select">
+            <option value="1">Conservative (safe, slower)</option>
+            <option value="2">Balanced</option>
+            <option value="4">Fast (needs more RAM)</option>
+          </select>
+          <div class="tune-hint">Minibatch size for inference</div>
+        </div>
+
+        <div class="tune-group tune-toggles" style="margin-top:8px;">
+          <label class="tune-checkbox">
+            <input type="checkbox" id="cfg-memory-efficient" checked />
+            <span>Memory-efficient mode</span>
+          </label>
+          <label class="tune-checkbox">
+            <input type="checkbox" id="cfg-mask-edges" checked />
+            <span>Mask edge noise</span>
+          </label>
+        </div>
+
+        <button id="tune-apply" class="tune-apply-btn" style="margin-top:12px;">
           🔄 Re-run Reconstruction
         </button>
       </div>
     `;
 
+    // Sync plate diameter
     $('backend-plate-diameter').addEventListener('change', (e) => {
       state.plateDiameter = parseFloat(e.target.value) || 26;
     });
 
+    // Live value for min-height slider
+    $('cfg-min-height').addEventListener('input', (e) => {
+      $('val-min-height').textContent = parseFloat(e.target.value).toFixed(1);
+    });
+
+    // Re-run button
     $('tune-apply').addEventListener('click', async () => {
       const btn = $('tune-apply');
       btn.textContent = 'Processing...';
       btn.disabled = true;
+      state.plateDiameter = parseFloat($('backend-plate-diameter').value) || 26;
       state.backendGlbLoaded = false;
       await startProcessing();
       btn.textContent = '🔄 Re-run Reconstruction';
       btn.disabled = false;
     });
 
-    return; // Don't initialise the browser controls
+    return;
   }
 
   // ── Browser-only mode: normal tuning controls ───────────────────────────

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List
 
 import numpy as np
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
@@ -46,20 +46,28 @@ else:
     DEVICE = "cpu"
 print(f"🖥  Device: {DEVICE}")
 
-# ── Lazy model loading ────────────────────────────────────────────────────────
+# ── Model loaded at startup (not lazily) ──────────────────────────────────────
 _model = None
-_model_lock = asyncio.Lock()
+
+@app.on_event("startup")
+async def load_model():
+    global _model
+    import asyncio
+    loop = asyncio.get_event_loop()
+    print("⬇️  Loading facebook/map-anything-apache from cache...")
+    import time; t0 = time.time()
+    _model = await loop.run_in_executor(None, _load_model_sync)
+    print(f"✅ Model ready in {time.time()-t0:.1f}s! Accepting requests.")
+
+def _load_model_sync():
+    from mapanything.models import MapAnything
+    m = MapAnything.from_pretrained("facebook/map-anything-apache").to(DEVICE)
+    m.eval()
+    return m
 
 async def get_model():
-    global _model
-    async with _model_lock:
-        if _model is None:
-            from mapanything.models import MapAnything
-            print("⬇️  Loading facebook/map-anything-apache (~5 GB on first run)...")
-            _model = MapAnything.from_pretrained("facebook/map-anything-apache").to(DEVICE)
-            _model.eval()
-            print("✅ Model ready!")
     return _model
+
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -71,13 +79,29 @@ async def health():
 @app.post("/api/reconstruct")
 async def reconstruct(
     images: List[UploadFile] = File(...),
-    plate_diameter_cm: float = 26.0,
+    plate_diameter_cm: float = Form(26.0),
+    segments:           int   = Form(0),     # 0 = auto
+    min_food_height_mm: float = Form(3.0),   # minimum height above plate (mm)
+    memory_efficient:   bool  = Form(True),  # slower but uses less RAM
+    minibatch_size:     int   = Form(1),     # 1-4, higher = faster but more VRAM
+    mask_edges:         bool  = Form(True),  # mask noisy edge depth predictions
 ):
     if not images:
         raise HTTPException(400, "No images provided")
 
     job_id = str(uuid.uuid4())
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"foodscan_{job_id}_"))
+
+    cfg = dict(
+        memory_efficient=memory_efficient,
+        minibatch_size=max(1, min(4, minibatch_size)),
+        mask_edges=mask_edges,
+    )
+    vol_cfg = dict(
+        plate_diameter_cm=plate_diameter_cm,
+        segments=segments,
+        min_food_height_mm=max(0.5, min_food_height_mm),
+    )
 
     try:
         # Save uploaded images
@@ -90,14 +114,14 @@ async def reconstruct(
         # Run MapAnything in thread pool (non-blocking)
         model = await get_model()
         result = await asyncio.get_event_loop().run_in_executor(
-            None, _infer, model, img_dir
+            None, _infer, model, img_dir, cfg
         )
 
         # Compute volumes
         volumes_result = compute_food_volumes(
             pointcloud=result["pointcloud"],
             colors=result["colors"],
-            plate_diameter_cm=plate_diameter_cm,
+            **vol_cfg,
         )
 
         # Export GLB
@@ -105,12 +129,13 @@ async def reconstruct(
         mesh_to_glb(result["pointcloud"], result["colors"], glb_path)
 
         return JSONResponse({
-            "job_id": job_id,
-            "glb_url": f"/glb/{job_id}.glb",
-            "total_volume_ml": volumes_result["total_volume_ml"],
-            "segments": volumes_result["segments"],
-            "device_used": DEVICE,
-            "num_images": len(images),
+            "job_id":           job_id,
+            "glb_url":          f"/glb/{job_id}.glb",
+            "total_volume_ml":  volumes_result["total_volume_ml"],
+            "segments":         volumes_result["segments"],
+            "device_used":      DEVICE,
+            "num_images":       len(images),
+            "config":           {**cfg, **vol_cfg},
         })
 
     except Exception as e:
@@ -120,23 +145,24 @@ async def reconstruct(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def _infer(model, img_dir: Path) -> dict:
+def _infer(model, img_dir: Path, cfg: dict = None) -> dict:
     """Synchronous MapAnything inference — runs in thread pool."""
     import torch
     from mapanything.utils.image import load_images
     from mapanything.utils.geometry import depthmap_to_world_frame
 
+    cfg = cfg or {}
     views = load_images(str(img_dir))
-    print(f"  Loaded {len(views)} view(s). Running inference...")
+    print(f"  Loaded {len(views)} view(s). Running inference (cfg={cfg})...")
 
     with torch.no_grad():
         outputs = model.infer(
             views,
-            memory_efficient_inference=True,
-            minibatch_size=1,
+            memory_efficient_inference=cfg.get("memory_efficient", True),
+            minibatch_size=cfg.get("minibatch_size", 1),
             use_amp=False,   # AMP = bf16, not supported on MPS
             apply_mask=True,
-            mask_edges=True,
+            mask_edges=cfg.get("mask_edges", True),
         )
 
     # Accumulate all views into a single point cloud
