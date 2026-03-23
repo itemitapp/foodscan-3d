@@ -595,6 +595,57 @@ function initViewerControls() {
 
 // ---- Tuning Panel ----
 function initTuningPanel() {
+  const tuningControls = $('tuning-controls');
+
+  // ── Backend mode: replace browser controls with MapAnything info panel ──
+  if (state.backendGlbLoaded) {
+    tuningControls.innerHTML = `
+      <div style="padding:8px 0 16px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+          <span style="font-size:20px;">🧠</span>
+          <div>
+            <div style="font-weight:600;color:#10b981;font-size:13px;">MapAnything Active</div>
+            <div style="font-size:11px;color:var(--text-muted);">Metric 3D reconstruction on MPS</div>
+          </div>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:16px;">
+          Depth estimation, mesh generation, and segmentation are handled
+          by the local MapAnything model — browser controls are not used.
+        </div>
+        <div class="tune-group">
+          <label>Plate diameter</label>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <input type="number" id="backend-plate-diameter"
+              value="${state.plateDiameter}" min="10" max="50" step="0.5"
+              style="width:70px;padding:4px 8px;background:var(--surface);border:1px solid var(--border);
+                     border-radius:6px;color:var(--text-primary);font-size:13px;" />
+            <span style="font-size:12px;color:var(--text-muted);">cm</span>
+          </div>
+        </div>
+        <button id="tune-apply" class="tune-apply-btn" style="margin-top:8px;">
+          🔄 Re-run Reconstruction
+        </button>
+      </div>
+    `;
+
+    $('backend-plate-diameter').addEventListener('change', (e) => {
+      state.plateDiameter = parseFloat(e.target.value) || 26;
+    });
+
+    $('tune-apply').addEventListener('click', async () => {
+      const btn = $('tune-apply');
+      btn.textContent = 'Processing...';
+      btn.disabled = true;
+      state.backendGlbLoaded = false;
+      await startProcessing();
+      btn.textContent = '🔄 Re-run Reconstruction';
+      btn.disabled = false;
+    });
+
+    return; // Don't initialise the browser controls
+  }
+
+  // ── Browser-only mode: normal tuning controls ───────────────────────────
   const applyBtn = $('tune-apply');
   
   // Live value display for sliders
@@ -618,6 +669,7 @@ function initTuningPanel() {
     regenerateModel();
   });
 }
+
 
 async function regenerateModel() {
   if (!state.cachedImageData || !state.cachedDepthResult) return;
