@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-FoodScan 3D — MapAnything Backend Server v2
+FoodScan 3D — MapAnything Backend Server v3
 Metric 3D food reconstruction using Facebook's MapAnything.
+In production mode this server also hosts the built Vite frontend
+so only one process is needed: python3 server.py → http://localhost:8000
 """
 import os
 import sys
@@ -16,10 +18,11 @@ import numpy as np
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 # Add MapAnything to Python path
 BACKEND_DIR = Path(__file__).parent
+ROOT_DIR    = BACKEND_DIR.parent          # repo root
 sys.path.insert(0, str(BACKEND_DIR / "map-anything"))
 
 from volume_calculator import compute_food_volumes, mesh_to_glb
@@ -200,6 +203,28 @@ def _infer(model, img_dir: Path, cfg: dict = None) -> dict:
     return {"pointcloud": pointcloud, "colors": colors}
 
 
+# ── Frontend static serving (production build) ───────────────────────────────
+# Serve Vite's built frontend at the root if dist/ exists.
+# In dev mode this is handled by `npm run dev` on port 5173.
+DIST_DIR = ROOT_DIR / "dist"
+if DIST_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
+
+    @app.get("/")
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str = ""):
+        """Catch-all: serve index.html for any non-API route (SPA routing)."""
+        # Don't catch API or /glb routes
+        if full_path.startswith(("api/", "glb/", "assets/")):
+            raise HTTPException(404)
+        return FileResponse(str(DIST_DIR / "index.html"))
+
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import webbrowser, uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    print(f"\n🚀 FoodScan 3D running at http://localhost:{port}")
+    print(f"   Frontend: {'built (dist/)' if DIST_DIR.exists() else 'not built — run npm run build'}")
+    if DIST_DIR.exists():
+        webbrowser.open(f"http://localhost:{port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
