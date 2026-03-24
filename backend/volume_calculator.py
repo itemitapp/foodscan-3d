@@ -1,143 +1,168 @@
 #!/usr/bin/env python3
 """
-Volume calculator for FoodScan 3D.
-Takes a metric 3D point cloud from MapAnything and returns
-per-region volumes in millilitres.
+Volume calculator for FoodScan 3D — v4 (Z-histogram depth approach).
 
-Physics-based approach:
-  1. RANSAC-fit the plate plane
-  2. Clip to plate-radius so background points don't poison the estimate
-  3. Integrate food height above the plate using a Delaunay triangration (like a DEM)
-  4. Cluster by colour+XY for per-region volumes
+Key insight from MapAnything coordinate system:
+  - Camera is at origin, food/plate scene is in +Z direction
+  - Z is the depth axis (closer = smaller Z)
+  - X is horizontal (left-right), Y is vertical (up-down)
+  - Food SITS ON TOP of the plate = food has SMALLER Z than plate
+  - The plate appears as the dominant flat surface (Z histogram peak)
+
+Algorithm:
+  1. Find plate depth via Z-histogram peak of center region
+  2. Food = points closer to camera than the plate (Z < plate_z - threshold)
+  3. Clip food to XY extent matching the plate diameter
+  4. Integrate height using Delaunay DEM on the XY plane
+  5. Cluster by colour+XY for per-region volumes
 """
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main volume computation
-# ──────────────────────────────────────────────────────────────────────────────
-
 def compute_food_volumes(
-    pointcloud: np.ndarray,  # (N, 3) metric coords in meters
-    colors: np.ndarray,      # (N, 3) RGB 0-1
-    plate_diameter_cm: float = 26.0,
-    segments: int = 0,       # 0 = auto; 1-8 = fixed number of regions
-    min_food_height_mm: float = 3.0,  # min height above plate to count as food
+    pointcloud: np.ndarray,   # (N, 3) metric world coords — Z = depth from camera
+    colors: np.ndarray,       # (N, 3) RGB 0-1
+    plate_diameter_cm: float  = 26.0,
+    segments: int             = 0,
+    min_food_height_mm: float = 3.0,
 ) -> Dict[str, Any]:
-    """
-    1. Fit a plate plane using RANSAC
-    2. Project points above the plate
-    3. Clip to the known plate diameter
-    4. Cluster food regions by color/proximity
-    5. Compute volume per cluster using triangulated height integration
-    """
-    if pointcloud is None or len(pointcloud) == 0:
+    if pointcloud is None or len(pointcloud) < 50:
         return {"total_volume_ml": 0.0, "segments": []}
 
-    plate_radius_m = (plate_diameter_cm / 2.0) / 100.0  # cm → m
-    min_height_m   = max(0.0005, min_food_height_mm / 1000.0)  # mm → m
+    plate_radius_m = (plate_diameter_cm / 2.0) / 100.0
+    min_height_m   = max(0.0005, min_food_height_mm / 1000.0)
 
-    # Step 1: Fit the plate plane via RANSAC
-    plate_normal, plate_d = fit_plane_ransac(pointcloud)
+    # ── Step 1: Find plate depth using Z histogram ─────────────────────────
+    # The plate is the dominant flat surface — it will be the tallest peak
+    # in the depth histogram. Use the central 50% of XY to avoid edges.
+    x, y, z = pointcloud[:, 0], pointcloud[:, 1], pointcloud[:, 2]
+    xc, yc  = float(np.median(x)), float(np.median(y))
+    # Use points within 60% of the XY range from center (plate region)
+    xr = (x.max() - x.min()) * 0.30
+    yr = (y.max() - y.min()) * 0.30
+    center_mask = (np.abs(x - xc) < xr) & (np.abs(y - yc) < yr)
+    z_center = z[center_mask]
 
-    # Step 2: Project all points onto the plate plane coordinate system
-    # height = signed distance above the plate
-    heights = pointcloud @ plate_normal - plate_d
-
-    # Step 3: Clip to plate region
-    # Project points onto the plate plane (in-plane XY)
-    up = plate_normal
-    # Build two orthogonal in-plane vectors
-    arbitrary = np.array([1.0, 0.0, 0.0]) if abs(up[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-    right = np.cross(up, arbitrary); right /= np.linalg.norm(right)
-    fwd   = np.cross(right, up);    fwd   /= np.linalg.norm(fwd)
-
-    # In-plane coordinates of each point
-    proj_x = pointcloud @ right
-    proj_y = pointcloud @ fwd
-
-    # Centre of the plate (mean of plate-plane inliers)
-    plate_mask = np.abs(heights) < 0.008  # ≤8mm: plate inliers
-    if plate_mask.sum() > 10:
-        cx = proj_x[plate_mask].mean()
-        cy = proj_y[plate_mask].mean()
+    if len(z_center) > 100:
+        # Histogram: 80 bins over Z range, find the FIRST (nearest) prominent peak
+        # which corresponds to the plate/table surface closest to camera.
+        hist, bins = np.histogram(z_center, bins=80)
+        # Smooth histogram to find peaks
+        from scipy.ndimage import uniform_filter1d
+        smooth = uniform_filter1d(hist.astype(float), size=3)
+        # Find the dominant peak closest to the camera (smallest Z = smallest bin idx with high count)
+        # Use a threshold of 10% of max count
+        threshold = smooth.max() * 0.10
+        candidates = np.where(smooth > threshold)[0]
+        if len(candidates) > 0:
+            # Use the FIRST peak cluster (nearest to camera)
+            peak_idx = int(candidates[0])
+            plate_z  = float((bins[peak_idx] + bins[peak_idx + 1]) / 2)
+        else:
+            peak_idx = int(np.argmax(hist))
+            plate_z  = float((bins[peak_idx] + bins[peak_idx + 1]) / 2)
     else:
-        cx = proj_x.mean()
-        cy = proj_y.mean()
+        plate_z = float(np.percentile(z, 60))
 
-    dist_from_center = np.sqrt((proj_x - cx)**2 + (proj_y - cy)**2)
+    print(f"  Plate depth (Z): {plate_z:.4f} m")
+    print(f"  Center region: {center_mask.sum():,}/{len(pointcloud):,} pts")
 
-    # Food points: above the plate AND within plate radius
-    above_mask = (heights > min_height_m) & (dist_from_center < plate_radius_m)
-    food_pts    = pointcloud[above_mask]
-    food_x      = proj_x[above_mask]
-    food_y      = proj_y[above_mask]
-    food_h      = heights[above_mask]
+    # ── Step 2: Select food points ─────────────────────────────────────────
+    # Food is CLOSER to camera (smaller Z) than the plate by at least min_height
+    # AND within the plate's XY extent (plate radius around XY centroid)
+
+    # XY centroid from plate-depth inliers
+    plate_inliers = center_mask & (np.abs(z - plate_z) < 0.020)
+    if plate_inliers.sum() > 20:
+        food_cx = float(x[plate_inliers].mean())
+        food_cy = float(y[plate_inliers].mean())
+    else:
+        food_cx, food_cy = xc, yc
+
+    dist_xy = np.sqrt((x - food_cx)**2 + (y - food_cy)**2)
+
+    food_z_threshold = plate_z - min_height_m  # closer than this = food
+    above_mask = (z < food_z_threshold) & (dist_xy < plate_radius_m)
+
+    food_x      = x[above_mask]
+    food_y      = y[above_mask]
+    food_z_vals = z[above_mask]
+    food_h      = plate_z - food_z_vals   # positive height above plate
     food_colors = colors[above_mask]
 
-    print(f"  Plate radius {plate_radius_m*100:.0f}cm: {above_mask.sum()} food pts "
-          f"(of {len(pointcloud)} total)")
+    print(f"  Plate centroid XY: ({food_cx:.3f}, {food_cy:.3f})")
+    print(f"  Food threshold: Z < {food_z_threshold:.4f} m, radius < {plate_radius_m*100:.0f} cm")
+    print(f"  Food points: {above_mask.sum():,}")
+    if len(food_h) > 0:
+        print(f"  Food height range: {food_h.min()*10:.1f}mm – {food_h.max()*100:.1f}cm")
 
-    if len(food_pts) < 30:
-        # Very few food points — volume based on bounding cylinder
-        rx = (food_x.max() - food_x.min()) / 2 if len(food_pts) > 1 else 0.05
-        ry = (food_y.max() - food_y.min()) / 2 if len(food_pts) > 1 else 0.05
-        h  = float(food_h.mean()) if len(food_pts) > 0 else 0.03
-        vol_ml = np.pi * rx * ry * h / 2 * 1e6
-        return {
-            "total_volume_ml": round(vol_ml, 1),
-            "segments": [{"id": 0, "label": "Food", "volume_ml": round(vol_ml, 1),
-                          "color": "#ff9900", "percentage": 100.0}],
-        }
+    if len(food_x) < 30:
+        print("  WARNING: Too few food pts — trying wider radius")
+        # Try 2× radius and see if that helps
+        food_mask2 = (z < food_z_threshold) & (dist_xy < plate_radius_m * 2)
+        if food_mask2.sum() > 30:
+            above_mask = food_mask2
+            food_x      = x[above_mask]
+            food_y      = y[above_mask]
+            food_z_vals = z[above_mask]
+            food_h      = plate_z - food_z_vals
+            food_colors = colors[above_mask]
+            print(f"  Extended radius: {above_mask.sum():,} food pts")
+        else:
+            return {"total_volume_ml": 0.0, "segments": [
+                {"id": 0, "label": "No food detected", "volume_ml": 0.0,
+                 "color": "#888888", "percentage": 100.0}
+            ]}
 
-    # Step 4: Cluster food by colour+position (KMeans)
+    # ── Step 3: Cluster food by colour+XY ─────────────────────────────────
+    food_xy = np.column_stack([food_x, food_y])
     try:
         from sklearn.cluster import KMeans
-        # 0 = auto: choose k based on point count; otherwise use fixed value
         if segments and 1 <= segments <= 8:
             k = segments
         else:
-            k = min(6, max(1, len(food_pts) // 500))
+            k = min(6, max(1, len(food_x) // 500))
         features = np.hstack([
-            food_colors * 2.0,           # colour weight
-            food_x[:, None] * 3.0,       # position weight
+            food_colors * 2.0,
+            food_x[:, None] * 3.0,
             food_y[:, None] * 3.0,
         ])
-        km = KMeans(n_clusters=k, n_init=3, random_state=42)
+        km     = KMeans(n_clusters=k, n_init=3, random_state=42)
         labels = km.fit_predict(features)
     except Exception:
-        labels = np.zeros(len(food_pts), dtype=int)
+        labels = np.zeros(len(food_x), dtype=int)
         k = 1
 
-    # Step 5: Per-segment volume using triangulated height integration (DEM)
-    segments = []
-    total_ml  = 0.0
-    food_xy   = np.column_stack([food_x, food_y])
+    # ── Step 4: Per-segment volume via Delaunay DEM on XY ─────────────────
+    total_ml     = 0.0
+    segments_out = []
+    fc_xy        = food_xy.mean(axis=0)
+    max_dist_xy  = np.linalg.norm(food_xy - fc_xy, axis=1).max() or 0.001
 
     for seg_id in range(k):
-        mask       = labels == seg_id
-        seg_xy     = food_xy[mask]
-        seg_h      = food_h[mask]
+        mask_s  = labels == seg_id
+        seg_xy  = food_xy[mask_s]
+        seg_h   = food_h[mask_s]
 
         if len(seg_xy) < 10:
             continue
 
-        vol_m3 = volume_from_dem(seg_xy, seg_h)
-        vol_ml = vol_m3 * 1e6  # m³ → mL
+        vol_m3  = volume_from_dem(seg_xy, seg_h)
+        vol_ml  = vol_m3 * 1e6
 
-        # Spatial label
-        seg_center = seg_xy.mean(axis=0)
-        dist_norm  = np.linalg.norm(seg_center - food_xy.mean(axis=0)) / (plate_radius_m or 0.1)
-        if dist_norm < 0.25:
+        seg_ctr  = seg_xy.mean(axis=0)
+        rel_dist = np.linalg.norm(seg_ctr - fc_xy) / max_dist_xy
+
+        if rel_dist < 0.25:
             label = "Main Portion"
-        elif dist_norm < 0.55:
-            label = f"Component {seg_id + 1}"
+        elif rel_dist < 0.55:
+            label = f"Food Item {seg_id + 1}"
         else:
             label = f"Side Item {seg_id}"
 
-        mean_rgb  = food_colors[mask].mean(axis=0)
+        mean_rgb  = food_colors[mask_s].mean(axis=0)
         hex_color = "#{:02x}{:02x}{:02x}".format(
             int(np.clip(mean_rgb[0], 0, 1) * 255),
             int(np.clip(mean_rgb[1], 0, 1) * 255),
@@ -145,66 +170,32 @@ def compute_food_volumes(
         )
 
         total_ml += vol_ml
-        segments.append({
+        segments_out.append({
             "id":          seg_id,
             "label":       label,
             "volume_ml":   round(vol_ml, 1),
             "color":       hex_color,
-            "point_count": int(mask.sum()),
+            "point_count": int(mask_s.sum()),
         })
 
-    # Sort largest first
-    segments.sort(key=lambda s: s["volume_ml"], reverse=True)
-    for s in segments:
+    segments_out.sort(key=lambda s: s["volume_ml"], reverse=True)
+    for s in segments_out:
         s["percentage"] = round(s["volume_ml"] / total_ml * 100 if total_ml > 0 else 0, 1)
 
-    return {
-        "total_volume_ml": round(total_ml, 1),
-        "segments":        segments,
-    }
+    print(f"  Total volume: {total_ml:.1f} ml, segments: {len(segments_out)}")
+    return {"total_volume_ml": round(total_ml, 1), "segments": segments_out}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Geometry helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def fit_plane_ransac(pts: np.ndarray, iterations: int = 150, threshold: float = 0.008) -> tuple:
-    """Fit the dominant flat surface (plate/table). Returns (normal, d)."""
-    best_normal   = np.array([0.0, 0.0, 1.0])
-    best_d        = float(np.median(pts[:, 2]))
-    best_inliers  = 0
-    rng           = np.random.default_rng(42)
-
-    for _ in range(iterations):
-        idx = rng.choice(len(pts), 3, replace=False)
-        p0, p1, p2 = pts[idx]
-        v1, v2     = p1 - p0, p2 - p0
-        normal     = np.cross(v1, v2)
-        norm       = np.linalg.norm(normal)
-        if norm < 1e-8:
-            continue
-        normal /= norm
-        # Use centroid of sampled points, not full mean (faster)
-        d  = float(pts[idx].mean(axis=0) @ normal)
-        ds = np.abs(pts @ normal - d)
-        n  = int((ds < threshold).sum())
-        if n > best_inliers:
-            best_inliers = n
-            best_normal  = normal
-            best_d       = d
-
-    if best_normal[2] < 0:
-        best_normal = -best_normal
-        best_d      = -best_d
-
-    return best_normal, best_d
-
-
-def volume_from_dem(xy: np.ndarray, h: np.ndarray) -> float:
+def volume_from_dem(xy: np.ndarray, h: np.ndarray, max_edge_m: float = 0.03) -> float:
     """
-    Estimate food volume by triangulating the 2D footprint and integrating heights.
-    This is the correct way to integrate a height field above a flat plate.
-    Returns volume in m³.
+    Integrate height field above the plate using Delaunay triangulation.
+    Filters out triangles with any edge longer than max_edge_m (default=3cm),
+    which removes large interpolated triangles over empty plate regions while
+    keeping small triangles from densely sampled food areas.
     """
     if len(xy) < 4:
         return 0.0
@@ -212,31 +203,34 @@ def volume_from_dem(xy: np.ndarray, h: np.ndarray) -> float:
         from scipy.spatial import Delaunay
         tri   = Delaunay(xy)
         total = 0.0
+        
         for simplex in tri.simplices:
             p0, p1, p2 = xy[simplex]
             h0, h1, h2 = h[simplex]
-            # Area of the triangle in XY
-            area = 0.5 * abs((p1[0]-p0[0])*(p2[1]-p0[1]) - (p2[0]-p0[0])*(p1[1]-p0[1]))
-            # Average height of the three vertices
+            # Skip triangles with any edge longer than max_edge_m
+            if (np.linalg.norm(p1-p0) > max_edge_m or
+                np.linalg.norm(p2-p1) > max_edge_m or
+                np.linalg.norm(p0-p2) > max_edge_m):
+                continue
+            area  = 0.5 * abs((p1[0]-p0[0])*(p2[1]-p0[1]) - (p2[0]-p0[0])*(p1[1]-p0[1]))
             avg_h = (h0 + h1 + h2) / 3.0
             if avg_h > 0:
                 total += area * avg_h
         return total
     except Exception:
-        # Cylinder fallback
         r = np.linalg.norm(xy - xy.mean(0), axis=1).max()
         return np.pi * r**2 * float(h.mean()) / 2
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# GLB export for Three.js — export as a voxelised surface mesh so it's visible
+# GLB export — visible colored surface mesh
 # ──────────────────────────────────────────────────────────────────────────────
 
 def mesh_to_glb(pointcloud: np.ndarray, colors: np.ndarray, output_path: Path):
     """
-    Convert a metric point cloud to a GLB file for Three.js.
-    Builds a Delaunay surface mesh from the food points so the model is visible.
-    Falls back to a raw PointCloud if scipy is unavailable.
+    Export a colored surface mesh GLB file for Three.js.
+    Uses Delaunay on the XY plane (since camera looks along Z).
+    Filters out large background triangles.
     """
     try:
         import trimesh
@@ -245,38 +239,37 @@ def mesh_to_glb(pointcloud: np.ndarray, colors: np.ndarray, output_path: Path):
         if len(pointcloud) < 4:
             raise ValueError("Not enough points")
 
-        # Subsample for performance (max 30k points for mesh)
-        if len(pointcloud) > 30000:
-            idx         = np.random.choice(len(pointcloud), 30000, replace=False)
-            pts         = pointcloud[idx]
-            clr         = colors[idx]
+        # Subsample for performance (center-weighted)
+        n = min(len(pointcloud), 20000)
+        if len(pointcloud) > n:
+            cx, cy = float(pointcloud[:, 0].mean()), float(pointcloud[:, 1].mean())
+            dist   = np.sqrt((pointcloud[:, 0] - cx)**2 + (pointcloud[:, 1] - cy)**2)
+            w      = 1.0 / (dist + 0.01)
+            w     /= w.sum()
+            idx    = np.random.choice(len(pointcloud), n, replace=False, p=w)
         else:
-            pts, clr = pointcloud, colors
+            idx = np.arange(len(pointcloud))
+        pts = pointcloud[idx]
+        clr = colors[idx]
 
-        # Build Delaunay triangulation on XZ plane (top-down view)
-        xy   = pts[:, [0, 2]]   # use X and Z for top-down triangulation
-        tri  = Delaunay(xy)
+        # Delaunay on XY (camera looks along Z so XY = image plane)
+        xy    = pts[:, :2]
+        tri   = Delaunay(xy)
+        faces = tri.simplices
 
-        # Filter out huge triangles (background noise)
-        verts    = pts
-        faces    = tri.simplices
+        # Filter huge triangles (depth discontinuities / background)
         edge_len = np.array([
-            np.max([
-                np.linalg.norm(verts[f[0]] - verts[f[1]]),
-                np.linalg.norm(verts[f[1]] - verts[f[2]]),
-                np.linalg.norm(verts[f[2]] - verts[f[0]]),
-            ])
+            max(np.linalg.norm(pts[f[0]] - pts[f[1]]),
+                np.linalg.norm(pts[f[1]] - pts[f[2]]),
+                np.linalg.norm(pts[f[2]] - pts[f[0]]))
             for f in faces
         ])
-        median_e = np.median(edge_len)
-        faces    = faces[edge_len < median_e * 4]  # remove outlier triangles
+        threshold = np.median(edge_len) * 3.0
+        faces     = faces[edge_len < threshold]
 
         vertex_colors = (np.clip(clr, 0, 1) * 255).astype(np.uint8)
-        # Assign face colors (mean of vertex colors)
-        face_colors   = vertex_colors[faces].mean(axis=1).astype(np.uint8)
-
         mesh = trimesh.Trimesh(
-            vertices=verts,
+            vertices=pts,
             faces=faces,
             vertex_colors=vertex_colors,
             process=False,
@@ -285,15 +278,15 @@ def mesh_to_glb(pointcloud: np.ndarray, colors: np.ndarray, output_path: Path):
         scene.add_geometry(mesh)
         glb_bytes = scene.export(file_type="glb")
         output_path.write_bytes(glb_bytes)
-        print(f"Saved surface mesh GLB: {output_path} ({len(glb_bytes) / 1024:.1f} KB), "
-              f"{len(faces)} faces")
+        print(f"  GLB saved: {output_path} ({len(glb_bytes)/1024:.1f}KB), "
+              f"{len(faces)} faces, {len(pts)} verts")
 
     except Exception as e:
-        print(f"Surface mesh failed ({e}), falling back to PointCloud GLB")
+        print(f"  Surface mesh failed ({e}), falling back to PointCloud GLB")
         try:
             import trimesh
-            sub = min(len(pointcloud), 50000)
-            idx = np.random.choice(len(pointcloud), sub, replace=False)
+            n   = min(len(pointcloud), 50000)
+            idx = np.random.choice(len(pointcloud), n, replace=False)
             pc  = trimesh.PointCloud(
                 vertices=pointcloud[idx],
                 colors=(np.clip(colors[idx], 0, 1) * 255).astype(np.uint8),
@@ -302,5 +295,5 @@ def mesh_to_glb(pointcloud: np.ndarray, colors: np.ndarray, output_path: Path):
             scene.add_geometry(pc)
             output_path.write_bytes(scene.export(file_type="glb"))
         except Exception as e2:
-            print(f"GLB export failed entirely: {e2}")
+            print(f"  GLB export failed: {e2}")
             output_path.write_bytes(b"")

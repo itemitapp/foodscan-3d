@@ -131,11 +131,14 @@ async def reconstruct(
         return JSONResponse({
             "job_id":           job_id,
             "glb_url":          f"/glb/{job_id}.glb",
-            "total_volume_ml":  volumes_result["total_volume_ml"],
-            "segments":         volumes_result["segments"],
+            "total_volume_ml":  float(volumes_result["total_volume_ml"]),
+            "segments":         [
+                {**s, "volume_ml": float(s["volume_ml"]), "percentage": float(s.get("percentage", 0))}
+                for s in volumes_result["segments"]
+            ],
             "device_used":      DEVICE,
             "num_images":       len(images),
-            "config":           {**cfg, **vol_cfg},
+            "config":           {k: (bool(v) if isinstance(v, (bool,)) else float(v) if hasattr(v, 'item') else v) for k, v in {**cfg, **vol_cfg}.items()},
         })
 
     except Exception as e:
@@ -149,7 +152,6 @@ def _infer(model, img_dir: Path, cfg: dict = None) -> dict:
     """Synchronous MapAnything inference — runs in thread pool."""
     import torch
     from mapanything.utils.image import load_images
-    from mapanything.utils.geometry import depthmap_to_world_frame
 
     cfg = cfg or {}
     views = load_images(str(img_dir))
@@ -166,28 +168,35 @@ def _infer(model, img_dir: Path, cfg: dict = None) -> dict:
         )
 
     # Accumulate all views into a single point cloud
-    all_pts = []
+    all_pts    = []
     all_colors = []
 
     for pred in outputs:
-        depth   = pred["depth_z"][0].squeeze(-1)          # (H, W)
-        K       = pred["intrinsics"][0]                    # (3, 3)
-        pose    = pred["camera_poses"][0]                  # (4, 4)
-        img_np  = pred["img_no_norm"][0].cpu().numpy()    # (H, W, 3) 0-255
-        mask_np = pred["mask"][0].squeeze(-1).cpu().numpy().astype(bool)  # (H, W)
+        # Use pts3d directly — already in world-frame metric coords
+        pts3d_np = pred["pts3d"][0].cpu().numpy()       # (H, W, 3) in meters
+        img_np   = pred["img_no_norm"][0].cpu().numpy() # (H, W, 3) range 0-1
+        mask_np  = pred["mask"][0].squeeze(-1).cpu().numpy().astype(bool)   # (H, W)
+        conf_np  = pred["conf"][0].cpu().numpy()        # (H, W) confidence 1-18
 
-        pts3d, valid = depthmap_to_world_frame(depth, K, pose)
-        combined_mask = mask_np & valid.cpu().numpy()
+        # Quality filter: must be masked AND high-confidence
+        conf_threshold = max(1.5, float(np.percentile(conf_np[mask_np], 25))) if mask_np.sum() > 0 else 1.5
+        good_mask = mask_np & (conf_np > conf_threshold)
 
-        pts   = pts3d.cpu().numpy()[combined_mask]           # (N, 3)
-        colors = img_np[combined_mask].astype(np.float32) / 255.0  # (N, 3)
+        pts    = pts3d_np[good_mask]                    # (N, 3)
+        colors = img_np[good_mask].astype(np.float32)  # (N, 3) already 0-1
+
+        print(f"  View: {pts3d_np.shape[:2]}, mask={mask_np.sum():,}, "
+              f"conf>{conf_threshold:.1f}={good_mask.sum():,} pts")
+        print(f"  XYZ range: X=[{pts[:,0].min():.2f},{pts[:,0].max():.2f}] "
+              f"Y=[{pts[:,1].min():.2f},{pts[:,1].max():.2f}] "
+              f"Z=[{pts[:,2].min():.2f},{pts[:,2].max():.2f}]")
 
         all_pts.append(pts)
         all_colors.append(colors)
 
     pointcloud = np.concatenate(all_pts, axis=0)
     colors     = np.concatenate(all_colors, axis=0)
-    print(f"  Point cloud: {len(pointcloud):,} points")
+    print(f"  Total point cloud: {len(pointcloud):,} points")
     return {"pointcloud": pointcloud, "colors": colors}
 
 
